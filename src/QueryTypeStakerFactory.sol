@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {QueryTypeStakingPool} from "src/QueryTypeStakingPool.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title QueryTypeStakerFactory
 /// @author [ScopeLift](https://scopelift.co)
@@ -10,27 +11,45 @@ import {QueryTypeStakingPool} from "src/QueryTypeStakingPool.sol";
 /// Each query type can have one active staking pool, and only the contract owner can create new
 /// pools.
 contract QueryTypeStakerFactory is Ownable {
-  /// @notice Maps query types to their corresponding staking pool addresses
+  /// @notice The token that will be used for staking.
+  IERC20 public immutable STAKING_TOKEN;
+
+  /// @notice Maps query types to their corresponding staking pool addresses.
   mapping(uint8 queryType => address poolAddress) public queryTypePools;
 
-  /// @notice Emitted when a new staking pool is created for a query type
+  /// @notice Emitted when a new staking pool is created for a query type.
   event CreateQueryTypeStakingPool(uint8 indexed queryType, address indexed poolAddress);
 
-  /// @notice Thrown when attempting to create a pool for a query type that already has one
+  /// @notice Thrown when attempting to create a pool for a query type that already has one.
   error QueryTypeStakerFactory__PoolExists();
 
-  /// @notice Constructor that sets the initial owner
-  constructor(address _owner) Ownable(_owner) {}
+  /// @notice Thrown when an invalid (zero) token address is provided.
+  error QueryTypeStakerFactory__InvalidTokenAddress();
 
-  /// @notice Creates a new staking pool for a specific query type
-  /// @param _queryType The type of query this pool will be associated with
-  /// @return _poolAddress The address of the newly created staking pool
-  /// @dev Only callable by the contract owner
-  function createStakingPool(uint8 _queryType) external onlyOwner returns (address _poolAddress) {
+  /// @notice Constructor that sets the initial owner and staking token.
+  /// @param _owner The address that will be set as the contract owner.
+  /// @param _stakingToken The address of the Wormhole token that will be used for staking.
+  constructor(address _owner, address _stakingToken) Ownable(_owner) {
+    if (_stakingToken == address(0)) revert QueryTypeStakerFactory__InvalidTokenAddress();
+    STAKING_TOKEN = IERC20(_stakingToken);
+  }
+
+  /// @notice Creates a new staking pool for a specific query type.
+  /// @param _queryType The type of query this pool will be associated with.
+  /// @param _poolOwner The address that will own the staking pool.
+  /// @param _initialEntry The initial conversion table entry for the pool.
+  /// @return _poolAddress The address of the newly created staking pool.
+  /// @dev Only callable by the contract owner.
+  function createStakingPool(uint8 _queryType, address _poolOwner, bytes32 _initialEntry)
+    external
+    returns (address _poolAddress)
+  {
+    _checkOwner();
     if (queryTypePools[_queryType] != address(0)) revert QueryTypeStakerFactory__PoolExists();
 
-    // Deploy new staking pool
-    QueryTypeStakingPool _newPool = new QueryTypeStakingPool();
+    // Deploy new staking pool with STAKING_TOKEN address and initial conversion entry
+    QueryTypeStakingPool _newPool =
+      new QueryTypeStakingPool(_poolOwner, address(STAKING_TOKEN), _initialEntry);
     _poolAddress = address(_newPool);
 
     // Store the pool address

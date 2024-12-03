@@ -9,67 +9,95 @@ import {VmSafe} from "forge-std/Vm.sol";
 contract QueryTypeStakerFactoryTest is Test {
   QueryTypeStakerFactory public factory;
   address public owner;
+  address public stakingToken;
   uint8 public queryType;
 
   function setUp() public virtual {
     owner = makeAddr("owner");
+    stakingToken = makeAddr("stakingToken");
     vm.prank(owner);
-    factory = new QueryTypeStakerFactory(owner);
+    factory = new QueryTypeStakerFactory(owner, stakingToken);
     queryType = 1;
   }
 
   function _createPool() internal returns (address) {
     vm.prank(owner);
-    return factory.createStakingPool(queryType);
+    return factory.createStakingPool(queryType, owner, bytes32(0));
   }
 }
 
 contract Constructor is QueryTypeStakerFactoryTest {
-  function testFuzz_SetsOwnerCorrectly(address _owner) public {
+  function testFuzz_SetsOwnerAndWTokenCorrectly(address _owner, address _stakingToken) public {
+    vm.assume(_owner != address(0) && _stakingToken != address(0));
+    vm.prank(_owner);
+    QueryTypeStakerFactory newFactory = new QueryTypeStakerFactory(_owner, _stakingToken);
+    assertEq(newFactory.owner(), _owner);
+    assertEq(address(newFactory.STAKING_TOKEN()), _stakingToken);
+  }
+
+  function testFuzz_RevertIf_StakingTokenAddressIsZero(address _owner) public {
     vm.assume(_owner != address(0));
     vm.prank(_owner);
-    QueryTypeStakerFactory newFactory = new QueryTypeStakerFactory(_owner);
-    assertEq(newFactory.owner(), _owner);
+    vm.expectRevert(QueryTypeStakerFactory.QueryTypeStakerFactory__InvalidTokenAddress.selector);
+    new QueryTypeStakerFactory(_owner, address(0));
   }
 }
 
 contract CreateStakingPool is QueryTypeStakerFactoryTest {
-  function testFuzz_CreatesNewStakingPoolWithArbitraryQueryType(uint8 _queryType) public {
+  function testFuzz_CreatesNewStakingPoolWithArbitraryQueryType(
+    uint8 _queryType,
+    address _poolOwner,
+    bytes32 _initialEntry
+  ) public {
+    vm.assume(_poolOwner != address(0));
     vm.prank(owner);
-    address poolAddress = factory.createStakingPool(_queryType);
+    address poolAddress = factory.createStakingPool(_queryType, _poolOwner, _initialEntry);
 
     assertTrue(poolAddress != address(0));
     assertEq(factory.queryTypePools(_queryType), poolAddress);
+    assertEq(QueryTypeStakingPool(poolAddress).owner(), _poolOwner);
   }
 
-  function testFuzz_EmitsCreateQueryTypeStakingPoolEventWithArbitraryQueryType(uint8 _queryType)
-    public
-  {
+  function testFuzz_EmitsCreateQueryTypeStakingPoolEventWithArbitraryQueryType(
+    uint8 _queryType,
+    address _poolOwner,
+    bytes32 _initialEntry
+  ) public {
+    vm.assume(_poolOwner != address(0));
     vm.recordLogs();
     vm.prank(owner);
-    address poolAddress = factory.createStakingPool(_queryType);
+    address poolAddress = factory.createStakingPool(_queryType, _poolOwner, _initialEntry);
 
     VmSafe.Log[] memory entries = vm.getRecordedLogs();
-    assertEq(entries.length, 1);
-    assertEq(entries[0].topics[0], keccak256("CreateQueryTypeStakingPool(uint8,address)"));
-    assertEq(entries[0].topics[1], bytes32(uint256(_queryType))); // queryType
-    assertEq(entries[0].topics[2], bytes32(uint256(uint160(poolAddress)))); // poolAddress
+    assertEq(entries[2].topics[0], keccak256("CreateQueryTypeStakingPool(uint8,address)"));
+    assertEq(entries[2].topics[1], bytes32(uint256(_queryType))); // queryType
+    assertEq(entries[2].topics[2], bytes32(uint256(uint160(poolAddress)))); // poolAddress
   }
 
-  function testFuzz_RevertIf_CallerIsNotOwner(address notOwner) public {
-    vm.assume(notOwner != owner && notOwner != address(0));
+  function testFuzz_RevertIf_CallerIsNotOwner(
+    address _notOwner,
+    address _poolOwner,
+    bytes32 _initialEntry
+  ) public {
+    vm.assume(_notOwner != owner && _notOwner != address(0));
+    vm.assume(_poolOwner != address(0));
 
-    vm.prank(notOwner);
-    vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", notOwner));
-    factory.createStakingPool(queryType);
+    vm.prank(_notOwner);
+    vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", _notOwner));
+    factory.createStakingPool(queryType, _poolOwner, _initialEntry);
   }
 
-  function testFuzz_RevertIf_PoolAlreadyExistsWithArbitraryQueryType(uint8 _queryType) public {
+  function testFuzz_RevertIf_PoolAlreadyExistsWithArbitraryQueryType(
+    uint8 _queryType,
+    address _poolOwner,
+    bytes32 _initialEntry
+  ) public {
+    vm.assume(_poolOwner != address(0));
     vm.startPrank(owner);
-    factory.createStakingPool(_queryType);
+    factory.createStakingPool(_queryType, _poolOwner, _initialEntry);
 
     vm.expectRevert(QueryTypeStakerFactory.QueryTypeStakerFactory__PoolExists.selector);
-    factory.createStakingPool(_queryType);
+    factory.createStakingPool(_queryType, _poolOwner, _initialEntry);
     vm.stopPrank();
   }
 }
