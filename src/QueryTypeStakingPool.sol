@@ -55,8 +55,17 @@ contract QueryTypeStakingPool is Ownable {
     uint48 accessEnd
   );
 
-  /// @notice Thrown when attempting to stake zero tokens.
-  error QueryTypeStakingPool__AmountTooLow();
+  /// @notice The maximum allowed staking capacity.
+  uint256 public stakingTokenCapacity;
+
+  /// @notice The minimum required stake amount.
+  uint256 public minimumStake;
+
+  /// @notice Emitted when the stakingTokenCapacity is updated.
+  event StakingTokenCapacityUpdated(uint256 newCapacity);
+
+  /// @notice Emitted when the minimum stake is updated.
+  event MinimumStakeUpdated(uint256 newMinimumStake);
 
   /// @notice Thrown when attempting to stake with an invalid lockup period.
   error QueryTypeStakingPool__LockupPeriodTooLow();
@@ -66,6 +75,12 @@ contract QueryTypeStakingPool is Ownable {
 
   /// @notice Thrown when a token transfer fails.
   error QueryTypeStakingPool__TokenTransferFailed();
+
+  /// @notice Thrown when the staking amount is below the minimum required.
+  error QueryTypeStakingPool__AmountBelowMinimum();
+
+  /// @notice Thrown when staking exceeds the maximum allowed capacity.
+  error QueryTypeStakingPool__CapacityExceeded();
 
   /// @notice Initializes the contract with the staking token address and initial conversion table
   /// entry.
@@ -83,6 +98,22 @@ contract QueryTypeStakingPool is Ownable {
     emit ConversionTableUpdated(_initialConversionTableEntry);
   }
 
+  /// @notice Sets the global staking capacity.
+  /// @param _capacity The new staking capacity.
+  function setStakingTokenCapacity(uint256 _capacity) external {
+    _checkOwner();
+    stakingTokenCapacity = _capacity;
+    emit StakingTokenCapacityUpdated(_capacity);
+  }
+
+  /// @notice Sets the minimum stake amount.
+  /// @param _minimumStake The new minimum stake amount.
+  function setMinimumStake(uint256 _minimumStake) external {
+    _checkOwner();
+    minimumStake = _minimumStake;
+    emit MinimumStakeUpdated(_minimumStake);
+  }
+
   /// @notice Adds a new conversion table entry to track changes in the conversion rate.
   /// @param _newEntry The new conversion table entry to add to the history.
   function updateConversionTable(bytes32 _newEntry) external {
@@ -94,24 +125,42 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice Allows users to stake tokens for the predefined lockup and access periods.
   /// @param _amount The amount of tokens to stake.
   function stake(uint256 _amount) external {
-    if (_amount == 0) revert QueryTypeStakingPool__AmountTooLow();
+    if (_amount < minimumStake) revert QueryTypeStakingPool__AmountBelowMinimum();
 
-    // Transfer tokens from user to pool using safeTransferFrom
+    uint256 totalStaked = STAKING_TOKEN.balanceOf(address(this));
+    if (totalStaked + _amount > stakingTokenCapacity) {
+      revert QueryTypeStakingPool__CapacityExceeded();
+    }
+
+    // Reset lockup and access periods
+    StakeInfo memory stakeInfo = stakes[msg.sender];
+    stakeInfo.lockupEnd = uint48(block.timestamp) + LOCKUP_PERIOD;
+    stakeInfo.accessEnd = stakeInfo.lockupEnd + ACCESS_PERIOD;
+
+    if (stakeInfo.amount == 0) {
+      // First-time stake
+      stakeInfo.amount = _amount;
+      stakeInfo.conversionTableIndex = conversionTableHistory.length - 1;
+      stakes[msg.sender] = stakeInfo;
+      STAKING_TOKEN.safeTransferFrom(msg.sender, address(this), _amount);
+      emit Staked(
+        msg.sender,
+        _amount,
+        stakeInfo.conversionTableIndex,
+        stakeInfo.lockupEnd,
+        stakeInfo.accessEnd
+      );
+      return;
+    }
+
+    stakeInfo.amount += _amount;
+    stakes[msg.sender] = stakeInfo;
+
     STAKING_TOKEN.safeTransferFrom(msg.sender, address(this), _amount);
 
-    // Calculate timestamps
-    uint48 lockupEnd = uint48(block.timestamp) + LOCKUP_PERIOD;
-    uint48 accessEnd = lockupEnd + ACCESS_PERIOD;
-
-    // Store stake information
-    stakes[msg.sender] = StakeInfo({
-      amount: _amount,
-      conversionTableIndex: conversionTableHistory.length - 1,
-      lockupEnd: lockupEnd,
-      accessEnd: accessEnd
-    });
-
-    emit Staked(msg.sender, _amount, conversionTableHistory.length - 1, lockupEnd, accessEnd);
+    emit Staked(
+      msg.sender, _amount, stakeInfo.conversionTableIndex, stakeInfo.lockupEnd, stakeInfo.accessEnd
+    );
   }
 
   /// @notice Returns the total number of entries in the conversion table history.

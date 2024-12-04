@@ -68,9 +68,15 @@ contract UpdateConversionTable is QueryTypeStakingPoolTest {
 }
 
 contract Stake is QueryTypeStakingPoolTest {
-  function testFuzz_StakesTokensSuccessfully(uint256 _amount, bytes32 _conversionEntry) public {
+  function testFuzz_StakesTokensSuccessfully(
+    uint256 _amount,
+    bytes32 _conversionEntry,
+    uint256 _capacity
+  ) public {
     _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
 
+    pool.setStakingTokenCapacity(_capacity);
     pool.updateConversionTable(_conversionEntry);
     uint256 expectedIndex = pool.getConversionTableHistoryLength() - 1;
 
@@ -90,9 +96,49 @@ contract Stake is QueryTypeStakingPoolTest {
     assertEq(stakingToken.balanceOf(address(pool)), _amount);
   }
 
-  function testFuzz_EmitsStakeEvent(uint256 _amount, bytes32 _conversionEntry) public {
-    _amount = bound(_amount, 1, INITIAL_BALANCE);
+  function testFuzz_UpdatesExistingStakeCorrectly(
+    uint256 _initialAmount,
+    uint256 _additionalAmount,
+    uint256 _capacity
+  ) public {
+    _initialAmount = bound(_initialAmount, 1, INITIAL_BALANCE / 2);
+    _additionalAmount = bound(_additionalAmount, 0, INITIAL_BALANCE - _initialAmount);
+    _capacity = bound(_capacity, _initialAmount + _additionalAmount, type(uint256).max);
 
+    pool.setStakingTokenCapacity(_capacity);
+
+    vm.prank(staker);
+    pool.stake(_initialAmount);
+
+    (, uint256 originalIndex,,) = pool.stakes(staker);
+
+    // Advance time a bit to ensure timestamps change
+    vm.warp(block.timestamp + 1 days);
+
+    vm.prank(staker);
+    pool.stake(_additionalAmount);
+
+    (uint256 finalAmount, uint256 finalIndex, uint48 finalLockupEnd, uint48 finalAccessEnd) =
+      pool.stakes(staker);
+
+    assertEq(finalAmount, _initialAmount + _additionalAmount, "Total stake amount incorrect");
+    assertEq(finalIndex, originalIndex, "Conversion table index should not change");
+    assertEq(finalLockupEnd, block.timestamp + pool.LOCKUP_PERIOD(), "Lockup end incorrect");
+    assertEq(finalAccessEnd, finalLockupEnd + pool.ACCESS_PERIOD(), "Access end incorrect");
+    assertEq(
+      stakingToken.balanceOf(address(pool)),
+      _initialAmount + _additionalAmount,
+      "Pool balance incorrect"
+    );
+  }
+
+  function testFuzz_EmitsStakeEvent(uint256 _amount, bytes32 _conversionEntry, uint256 _capacity)
+    public
+  {
+    _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
     pool.updateConversionTable(_conversionEntry);
     uint256 expectedIndex = pool.getConversionTableHistoryLength() - 1;
 
@@ -108,14 +154,11 @@ contract Stake is QueryTypeStakingPoolTest {
     pool.stake(_amount);
   }
 
-  function testFuzz_RevertIf_AmountIsZero() public {
-    vm.prank(staker);
-    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__AmountTooLow.selector);
-    pool.stake(0);
-  }
-
-  function testFuzz_RevertIf_InsufficientBalance(uint256 _amount) public {
+  function testFuzz_RevertIf_InsufficientBalance(uint256 _amount, uint256 _capacity) public {
     _amount = bound(_amount, INITIAL_BALANCE + 1, type(uint256).max);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
 
     vm.prank(staker);
     vm.expectRevert(
@@ -126,9 +169,11 @@ contract Stake is QueryTypeStakingPoolTest {
     pool.stake(_amount);
   }
 
-  function testFuzz_RevertIf_TokenTransferFails(uint256 _amount) public {
+  function testFuzz_RevertIf_TokenTransferFails(uint256 _amount, uint256 _capacity) public {
     _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
 
+    pool.setStakingTokenCapacity(_capacity);
     stakingToken.setTransferFromShouldFail(true);
 
     vm.prank(staker);
@@ -137,6 +182,35 @@ contract Stake is QueryTypeStakingPoolTest {
         bytes4(keccak256("SafeERC20FailedOperation(address)")), address(stakingToken)
       )
     );
+    pool.stake(_amount);
+  }
+
+  function testFuzz_RevertIf_ExceedsCapacity(uint256 _amount, uint256 _capacity) public {
+    _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, 0, _amount - 1);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__CapacityExceeded.selector);
+    pool.stake(_amount);
+  }
+
+  function testFuzz_RevertIf_StakeAmountBelowMinimum(
+    uint256 _amount,
+    uint256 _minimumStake,
+    uint256 _capacity
+  ) public {
+    // Ensure amount is greater than 0 but less than minimum stake
+    _minimumStake = bound(_minimumStake, 2, INITIAL_BALANCE);
+    _amount = bound(_amount, 1, _minimumStake - 1);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+    pool.setMinimumStake(_minimumStake);
+
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__AmountBelowMinimum.selector);
     pool.stake(_amount);
   }
 }
@@ -155,5 +229,51 @@ contract GetConversionTableHistoryLength is QueryTypeStakingPoolTest {
 
     // Final length should be 100
     assertEq(pool.getConversionTableHistoryLength(), 100);
+  }
+}
+
+contract SetStakingTokenCapacity is QueryTypeStakingPoolTest {
+  function testFuzz_SetStakingTokenCapacitySuccessfully(uint256 _newCapacity) public {
+    pool.setStakingTokenCapacity(_newCapacity);
+    assertEq(pool.stakingTokenCapacity(), _newCapacity);
+  }
+
+  function testFuzz_SetStakingTokenCapacityEmitsEvent(uint256 _newCapacity) public {
+    vm.expectEmit();
+    emit QueryTypeStakingPool.StakingTokenCapacityUpdated(_newCapacity);
+
+    pool.setStakingTokenCapacity(_newCapacity);
+  }
+
+  function testFuzz_SetStakingTokenCapacity_RevertIf_NotOwner(
+    address _notOwner,
+    uint256 _newCapacity
+  ) public {
+    vm.assume(_notOwner != address(this));
+    vm.prank(_notOwner);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
+    pool.setStakingTokenCapacity(_newCapacity);
+  }
+}
+
+contract SetMinimumStake is QueryTypeStakingPoolTest {
+  function testFuzz_SetMinimumStakeSuccessfully(uint256 _newMinimumStake) public {
+    pool.setMinimumStake(_newMinimumStake);
+    assertEq(pool.minimumStake(), _newMinimumStake);
+  }
+
+  function testFuzz_SetMinimumStakeEmitsEvent(uint256 _newMinimumStake) public {
+    vm.expectEmit();
+    emit QueryTypeStakingPool.MinimumStakeUpdated(_newMinimumStake);
+
+    pool.setMinimumStake(_newMinimumStake);
+  }
+
+  function testFuzz_SetMinimumStake_RevertIf_NotOwner(address caller, uint256 amount) public {
+    vm.assume(caller != address(0) && caller != address(this));
+
+    vm.prank(caller);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
+    pool.setMinimumStake(amount);
   }
 }
