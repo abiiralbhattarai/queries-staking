@@ -80,8 +80,8 @@ contract Stake is QueryTypeStakingPoolTest {
     pool.updateConversionTable(_conversionEntry);
     uint256 expectedIndex = pool.getConversionTableHistoryLength() - 1;
 
-    uint256 expectedLockupEnd = block.timestamp + pool.LOCKUP_PERIOD();
-    uint256 expectedAccessEnd = expectedLockupEnd + pool.ACCESS_PERIOD();
+    uint256 expectedLockupEnd = block.timestamp + pool.lockupPeriod();
+    uint256 expectedAccessEnd = expectedLockupEnd + pool.accessPeriod();
 
     vm.prank(staker);
     pool.stake(_amount);
@@ -123,13 +123,40 @@ contract Stake is QueryTypeStakingPoolTest {
 
     assertEq(finalAmount, _initialAmount + _additionalAmount, "Total stake amount incorrect");
     assertEq(finalIndex, originalIndex, "Conversion table index should not change");
-    assertEq(finalLockupEnd, block.timestamp + pool.LOCKUP_PERIOD(), "Lockup end incorrect");
-    assertEq(finalAccessEnd, finalLockupEnd + pool.ACCESS_PERIOD(), "Access end incorrect");
+    assertEq(finalLockupEnd, block.timestamp + pool.lockupPeriod(), "Lockup end incorrect");
+    assertEq(finalAccessEnd, finalLockupEnd + pool.accessPeriod(), "Access end incorrect");
     assertEq(
       stakingToken.balanceOf(address(pool)),
       _initialAmount + _additionalAmount,
       "Pool balance incorrect"
     );
+  }
+
+  function testFuzz_StakeCalculatesEndTimesWithNewPeriods(
+    uint256 _amount,
+    uint48 _newLockupPeriod,
+    uint48 _newAccessPeriod,
+    uint256 _capacity
+  ) public {
+    _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _newLockupPeriod = uint48(bound(_newLockupPeriod, 0, 1000 days));
+    _newAccessPeriod = uint48(bound(_newAccessPeriod, 0, 1000 days));
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+    pool.setLockupPeriod(_newLockupPeriod);
+    pool.setAccessPeriod(_newAccessPeriod);
+
+    uint256 expectedLockupEnd = block.timestamp + _newLockupPeriod;
+    uint256 expectedAccessEnd = expectedLockupEnd + _newAccessPeriod;
+
+    vm.prank(staker);
+    pool.stake(_amount);
+
+    (,, uint48 lockupEnd, uint48 accessEnd) = pool.stakes(staker);
+
+    assertEq(lockupEnd, expectedLockupEnd);
+    assertEq(accessEnd, expectedAccessEnd);
   }
 
   function testFuzz_EmitsStakeEvent(uint256 _amount, bytes32 _conversionEntry, uint256 _capacity)
@@ -142,8 +169,8 @@ contract Stake is QueryTypeStakingPoolTest {
     pool.updateConversionTable(_conversionEntry);
     uint256 expectedIndex = pool.getConversionTableHistoryLength() - 1;
 
-    uint48 expectedLockupEnd = uint48(block.timestamp) + pool.LOCKUP_PERIOD();
-    uint48 expectedAccessEnd = expectedLockupEnd + pool.ACCESS_PERIOD();
+    uint48 expectedLockupEnd = uint48(block.timestamp) + pool.lockupPeriod();
+    uint48 expectedAccessEnd = expectedLockupEnd + pool.accessPeriod();
 
     vm.expectEmit();
     emit QueryTypeStakingPool.Staked(
@@ -275,5 +302,47 @@ contract SetMinimumStake is QueryTypeStakingPoolTest {
     vm.prank(caller);
     vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
     pool.setMinimumStake(amount);
+  }
+}
+
+contract SetLockupPeriod is QueryTypeStakingPoolTest {
+  function testFuzz_SetLockupPeriodSuccessfully(uint48 _newPeriod) public {
+    pool.setLockupPeriod(_newPeriod);
+    assertEq(pool.lockupPeriod(), _newPeriod);
+  }
+
+  function testFuzz_SetLockupPeriodEmitsEvent(uint48 _newPeriod) public {
+    vm.expectEmit();
+    emit QueryTypeStakingPool.LockupPeriodUpdated(_newPeriod);
+
+    pool.setLockupPeriod(_newPeriod);
+  }
+
+  function testFuzz_SetLockupPeriod_RevertIf_NotOwner(address _notOwner, uint48 _newPeriod) public {
+    vm.assume(_notOwner != address(this));
+    vm.prank(_notOwner);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
+    pool.setLockupPeriod(_newPeriod);
+  }
+}
+
+contract SetAccessPeriod is QueryTypeStakingPoolTest {
+  function testFuzz_SetAccessPeriodSuccessfully(uint48 _newPeriod) public {
+    pool.setAccessPeriod(_newPeriod);
+    assertEq(pool.accessPeriod(), _newPeriod);
+  }
+
+  function testFuzz_SetAccessPeriodEmitsEvent(uint48 _newPeriod) public {
+    vm.expectEmit();
+    emit QueryTypeStakingPool.AccessPeriodUpdated(_newPeriod);
+
+    pool.setAccessPeriod(_newPeriod);
+  }
+
+  function testFuzz_SetAccessPeriod_RevertIf_NotOwner(address _notOwner, uint48 _newPeriod) public {
+    vm.assume(_notOwner != address(this));
+    vm.prank(_notOwner);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
+    pool.setAccessPeriod(_newPeriod);
   }
 }

@@ -17,10 +17,10 @@ contract QueryTypeStakingPool is Ownable {
 
   /// @notice The duration in seconds that tokens will be locked after staking. During this period
   /// tokens cannot be withdrawn.
-  uint48 public constant LOCKUP_PERIOD = 30 days;
+  uint48 public lockupPeriod = 30 days;
 
   /// @notice The duration in seconds after the lockup period during which tokens can be withdrawn.
-  uint48 public constant ACCESS_PERIOD = 60 days;
+  uint48 public accessPeriod = 60 days;
 
   /// @notice The array that stores the history of conversion table entries. Each entry represents a
   /// conversion rate between staked tokens and query credits at a point in time.
@@ -54,6 +54,12 @@ contract QueryTypeStakingPool is Ownable {
     uint48 lockupEnd,
     uint48 accessEnd
   );
+
+  /// @notice Emitted when the lockup period is updated
+  event LockupPeriodUpdated(uint48 newPeriod);
+
+  /// @notice Emitted when the access period is updated
+  event AccessPeriodUpdated(uint48 newPeriod);
 
   /// @notice The maximum allowed staking capacity.
   uint256 public stakingTokenCapacity;
@@ -114,6 +120,22 @@ contract QueryTypeStakingPool is Ownable {
     emit MinimumStakeUpdated(_minimumStake);
   }
 
+  /// @notice Sets the lockup period duration
+  /// @param _period The new lockup period in seconds
+  function setLockupPeriod(uint48 _period) external {
+    _checkOwner();
+    lockupPeriod = _period;
+    emit LockupPeriodUpdated(_period);
+  }
+
+  /// @notice Sets the access period duration
+  /// @param _period The new access period in seconds
+  function setAccessPeriod(uint48 _period) external {
+    _checkOwner();
+    accessPeriod = _period;
+    emit AccessPeriodUpdated(_period);
+  }
+
   /// @notice Adds a new conversion table entry to track changes in the conversion rate.
   /// @param _newEntry The new conversion table entry to add to the history.
   function updateConversionTable(bytes32 _newEntry) external {
@@ -134,8 +156,8 @@ contract QueryTypeStakingPool is Ownable {
 
     // Reset lockup and access periods
     StakeInfo memory stakeInfo = stakes[msg.sender];
-    stakeInfo.lockupEnd = uint48(block.timestamp) + LOCKUP_PERIOD;
-    stakeInfo.accessEnd = stakeInfo.lockupEnd + ACCESS_PERIOD;
+    stakeInfo.lockupEnd = uint48(block.timestamp) + lockupPeriod;
+    stakeInfo.accessEnd = stakeInfo.lockupEnd + accessPeriod;
 
     if (stakeInfo.amount == 0) {
       // First-time stake
