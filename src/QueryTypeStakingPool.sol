@@ -42,6 +42,18 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice A mapping that associates staker addresses with their stake information.
   mapping(address staker => StakeInfo info) public stakes;
 
+  /// @notice A mapping that associates each staker with their signer.
+  mapping(address staker => address signer) public stakerSigners;
+
+  /// @notice The maximum allowed staking capacity.
+  uint256 public stakingTokenCapacity;
+
+  /// @notice The minimum required stake amount.
+  uint256 public minimumStake;
+
+  /// @notice The total amount of tokens currently staked in the pool.
+  uint256 public totalStaked;
+
   /// @notice Emitted when a new conversion table entry is added to track changes in the conversion
   /// rate.
   event ConversionTableUpdated(bytes32 newEntry);
@@ -61,17 +73,17 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice Emitted when the access period is updated
   event AccessPeriodUpdated(uint48 newPeriod);
 
-  /// @notice The maximum allowed staking capacity.
-  uint256 public stakingTokenCapacity;
-
-  /// @notice The minimum required stake amount.
-  uint256 public minimumStake;
-
   /// @notice Emitted when the stakingTokenCapacity is updated.
   event StakingTokenCapacityUpdated(uint256 newCapacity);
 
   /// @notice Emitted when the minimum stake is updated.
   event MinimumStakeUpdated(uint256 newMinimumStake);
+
+  /// @notice Emitted when tokens are unstaked.
+  event Unstaked(address indexed staker, uint256 amount);
+
+  /// @notice Emitted when a staker's signer is updated.
+  event SignerUpdated(address indexed staker, address indexed oldSigner, address indexed newSigner);
 
   /// @notice Thrown when attempting to stake with an invalid lockup period.
   error QueryTypeStakingPool__LockupPeriodTooLow();
@@ -87,6 +99,15 @@ contract QueryTypeStakingPool is Ownable {
 
   /// @notice Thrown when staking exceeds the maximum allowed capacity.
   error QueryTypeStakingPool__CapacityExceeded();
+
+  /// @notice Thrown when attempting to unstake during lockup period.
+  error QueryTypeStakingPool__StillInLockupPeriod();
+
+  /// @notice Thrown when attempting to unstake with no stake.
+  error QueryTypeStakingPool__NoStakeFound();
+
+  /// @notice Thrown when attempting to unstake more than staked amount.
+  error QueryTypeStakingPool__InsufficientBalance();
 
   /// @notice Initializes the contract with the staking token address and initial conversion table
   /// entry.
@@ -149,7 +170,6 @@ contract QueryTypeStakingPool is Ownable {
   function stake(uint256 _amount) external {
     if (_amount < minimumStake) revert QueryTypeStakingPool__AmountBelowMinimum();
 
-    uint256 totalStaked = STAKING_TOKEN.balanceOf(address(this));
     if (totalStaked + _amount > stakingTokenCapacity) {
       revert QueryTypeStakingPool__CapacityExceeded();
     }
@@ -158,6 +178,7 @@ contract QueryTypeStakingPool is Ownable {
     StakeInfo memory stakeInfo = stakes[msg.sender];
     stakeInfo.lockupEnd = uint48(block.timestamp) + lockupPeriod;
     stakeInfo.accessEnd = stakeInfo.lockupEnd + accessPeriod;
+    totalStaked += _amount;
 
     if (stakeInfo.amount == 0) {
       // First-time stake
@@ -189,5 +210,29 @@ contract QueryTypeStakingPool is Ownable {
   /// @return The length of the conversion table history array.
   function getConversionTableHistoryLength() external view returns (uint256) {
     return conversionTableHistory.length;
+  }
+
+  /// @notice Allows users to unstake their tokens after the lockup period.
+  /// @param _amount The amount of tokens the user wishes to unstake.
+  function unstake(uint256 _amount) external {
+    StakeInfo storage userStake = stakes[msg.sender];
+    if (userStake.amount == 0) revert QueryTypeStakingPool__NoStakeFound();
+    if (block.timestamp < userStake.lockupEnd) revert QueryTypeStakingPool__StillInLockupPeriod();
+    if (_amount > userStake.amount) revert QueryTypeStakingPool__InsufficientBalance();
+
+    userStake.amount -= _amount;
+    totalStaked -= _amount;
+    STAKING_TOKEN.safeTransfer(msg.sender, _amount);
+
+    emit Unstaked(msg.sender, _amount);
+  }
+
+  /// @notice Allows a staker to set or update their designated signer.
+  /// @param _newSigner The address to set as the signer for the caller.
+  function setSigner(address _newSigner) external {
+    if (stakes[msg.sender].amount == 0) revert QueryTypeStakingPool__NoStakeFound();
+    address oldSigner = stakerSigners[msg.sender];
+    stakerSigners[msg.sender] = _newSigner;
+    emit SignerUpdated(msg.sender, oldSigner, _newSigner);
   }
 }

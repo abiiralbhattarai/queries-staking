@@ -11,7 +11,8 @@ contract QueryTypeStakingPoolTest is Test {
   QueryTypeStakingPool public pool;
   MockERC20 public stakingToken;
   address public staker;
-  uint256 public constant INITIAL_BALANCE = 1000 ether;
+  uint256 public constant INITIAL_BALANCE = 1_000_000_000 ether;
+  uint256 public constant MAX_TIME_SKIP = 1000 * 365 days;
 
   function setUp() public virtual {
     staker = makeAddr("staker");
@@ -94,6 +95,7 @@ contract Stake is QueryTypeStakingPoolTest {
     assertEq(lockupEnd, expectedLockupEnd);
     assertEq(accessEnd, expectedAccessEnd);
     assertEq(stakingToken.balanceOf(address(pool)), _amount);
+    assertEq(pool.totalStaked(), _amount);
   }
 
   function testFuzz_UpdatesExistingStakeCorrectly(
@@ -129,6 +131,9 @@ contract Stake is QueryTypeStakingPoolTest {
       stakingToken.balanceOf(address(pool)),
       _initialAmount + _additionalAmount,
       "Pool balance incorrect"
+    );
+    assertEq(
+      pool.totalStaked(), _initialAmount + _additionalAmount, "Total staked amount incorrect"
     );
   }
 
@@ -344,5 +349,221 @@ contract SetAccessPeriod is QueryTypeStakingPoolTest {
     vm.prank(_notOwner);
     vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
     pool.setAccessPeriod(_newPeriod);
+  }
+}
+
+contract Unstake is QueryTypeStakingPoolTest {
+  function testFuzz_UnstakeSuccessfully(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, 1, _stakeAmount);
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, MAX_TIME_SKIP);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+    uint256 initialBalance = stakingToken.balanceOf(staker);
+
+    vm.prank(staker);
+    pool.unstake(_unstakeAmount);
+
+    assertEq(stakingToken.balanceOf(staker), initialBalance + _unstakeAmount);
+    (uint256 remainingStake,,,) = pool.stakes(staker);
+    assertEq(remainingStake, _stakeAmount - _unstakeAmount);
+    assertEq(pool.totalStaked(), _stakeAmount - _unstakeAmount);
+  }
+
+  function testFuzz_UnstakeAfterMultipleStakes(
+    uint256 _initialStake,
+    uint256 _additionalStake,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _initialStake = bound(_initialStake, 1, INITIAL_BALANCE / 2);
+    _additionalStake = bound(_additionalStake, 0, INITIAL_BALANCE - _initialStake);
+    uint256 totalStaked = _initialStake + _additionalStake;
+    _unstakeAmount = bound(_unstakeAmount, 1, totalStaked);
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, MAX_TIME_SKIP);
+    _capacity = bound(_capacity, totalStaked, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_initialStake);
+
+    // Additional stake
+    vm.prank(staker);
+    pool.stake(_additionalStake);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    uint256 initialBalance = stakingToken.balanceOf(staker);
+
+    vm.prank(staker);
+    pool.unstake(_unstakeAmount);
+
+    assertEq(stakingToken.balanceOf(staker), initialBalance + _unstakeAmount);
+    (uint256 remainingStake,,,) = pool.stakes(staker);
+    assertEq(remainingStake, totalStaked - _unstakeAmount);
+    assertEq(stakingToken.balanceOf(address(pool)), totalStaked - _unstakeAmount);
+    assertEq(pool.totalStaked(), totalStaked - _unstakeAmount);
+  }
+
+  function testFuzz_RevertIf_StillInLockup(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, 1, _stakeAmount);
+    // Bound time skip to be before lockup period ends
+    _timeSkip = bound(_timeSkip, 0, pool.lockupPeriod() - 1);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Warp to invalid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__StillInLockupPeriod.selector);
+    pool.unstake(_unstakeAmount);
+  }
+
+  function testFuzz_RevertIf_NoStakeFound(address _nonStaker, uint256 _amount, uint256 _capacity)
+    public
+  {
+    vm.assume(_nonStaker != address(0));
+    vm.assume(_nonStaker != staker);
+    _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    vm.prank(_nonStaker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__NoStakeFound.selector);
+    pool.unstake(_amount);
+  }
+
+  function testFuzz_RevertIf_InsufficientBalance(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, _stakeAmount + 1, type(uint256).max);
+
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, MAX_TIME_SKIP);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__InsufficientBalance.selector);
+    pool.unstake(_unstakeAmount);
+  }
+
+  function testFuzz_EmitsUnstakeEvent(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, 1, _stakeAmount);
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, pool.lockupPeriod() + pool.accessPeriod());
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    vm.expectEmit();
+    emit QueryTypeStakingPool.Unstaked(staker, _unstakeAmount);
+
+    vm.prank(staker);
+    pool.unstake(_unstakeAmount);
+  }
+}
+
+contract SetSigner is QueryTypeStakingPoolTest {
+  function testFuzz_SetSignerSuccessfully(address _signer, uint256 _stakeAmount, uint256 _capacity)
+    public
+  {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    // Setup initial stake
+    pool.setStakingTokenCapacity(_capacity);
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    assertEq(pool.stakerSigners(staker), address(0));
+
+    vm.prank(staker);
+    pool.setSigner(_signer);
+    assertEq(pool.stakerSigners(staker), _signer);
+  }
+
+  function testFuzz_EmitsSignerUpdatedEvent(
+    address _oldSigner,
+    address _newSigner,
+    uint256 _stakeAmount,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    // Setup initial stake
+    pool.setStakingTokenCapacity(_capacity);
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Set initial signer
+    vm.prank(staker);
+    pool.setSigner(_oldSigner);
+
+    vm.expectEmit();
+    emit QueryTypeStakingPool.SignerUpdated(staker, _oldSigner, _newSigner);
+
+    vm.prank(staker);
+    pool.setSigner(_newSigner);
+  }
+
+  function testFuzz_RevertIf_NoStake(address _signer) public {
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__NoStakeFound.selector);
+    pool.setSigner(_signer);
   }
 }
