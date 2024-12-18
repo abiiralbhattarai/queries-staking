@@ -20,4 +20,17 @@ contract MockERC20 is ERC20 {
     if (transferFromShouldFail) return false;
     return super.transferFrom(from, to, amount);
   }
+
+  error SafeERC20FailedOperation(address token);
+
+  bool public transferShouldFail = false;
+
+  function setTransferShouldFail(bool _shouldFail) external {
+    transferShouldFail = _shouldFail;
+  }
+
+  function transfer(address to, uint256 amount) public override returns (bool) {
+    if (transferShouldFail) revert SafeERC20FailedOperation(address(this));
+    return super.transfer(to, amount);
+  }
 }

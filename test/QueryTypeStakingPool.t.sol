@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {QueryTypeStakingPool} from "src/QueryTypeStakingPool.sol";
+import {QueryTypeStakerFactory} from "src/QueryTypeStakerFactory.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "test/mocks/MockERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -10,6 +11,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract QueryTypeStakingPoolTest is Test {
   QueryTypeStakingPool public pool;
   MockERC20 public stakingToken;
+  address public factory;
   address public staker;
   uint256 public constant INITIAL_BALANCE = 1_000_000_000 ether;
   uint256 public constant MAX_TIME_SKIP = 1000 * 365 days;
@@ -17,6 +19,7 @@ contract QueryTypeStakingPoolTest is Test {
   function setUp() public virtual {
     staker = makeAddr("staker");
     stakingToken = new MockERC20();
+    factory = makeAddr("factory");
     bytes32 initialEntry = bytes32(uint256(1));
     pool = new QueryTypeStakingPool(address(this), address(stakingToken), initialEntry);
 
@@ -245,6 +248,25 @@ contract Stake is QueryTypeStakingPoolTest {
     vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__AmountBelowMinimum.selector);
     pool.stake(_amount);
   }
+
+  function testFuzz_RevertIf_AddressIsBlocklisted(uint256 _amount, uint256 _capacity) public {
+    _amount = bound(_amount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _amount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Setup initial stake to allow blocklisting
+    vm.prank(staker);
+    pool.stake(_amount);
+
+    // Blocklist the staker
+    pool.blocklist(staker);
+
+    // Try to stake more
+    vm.prank(staker);
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__AddressBlocklisted.selector);
+    pool.stake(_amount);
+  }
 }
 
 contract GetConversionTableHistoryLength is QueryTypeStakingPoolTest {
@@ -281,7 +303,8 @@ contract SetStakingTokenCapacity is QueryTypeStakingPoolTest {
     address _notOwner,
     uint256 _newCapacity
   ) public {
-    vm.assume(_notOwner != address(this));
+    vm.assume(_notOwner != address(this)); // not owner
+
     vm.prank(_notOwner);
     vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
     pool.setStakingTokenCapacity(_newCapacity);
@@ -422,6 +445,38 @@ contract Unstake is QueryTypeStakingPoolTest {
     assertEq(pool.totalStaked(), totalStaked - _unstakeAmount);
   }
 
+  function testFuzz_RevertIf_TokenTransferFails(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, 1, _stakeAmount);
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, MAX_TIME_SKIP);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    // Make transfer fail
+    stakingToken.setTransferShouldFail(true);
+
+    vm.prank(staker);
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        bytes4(keccak256("SafeERC20FailedOperation(address)")), address(stakingToken)
+      )
+    );
+    pool.unstake(_unstakeAmount);
+  }
+
   function testFuzz_RevertIf_StillInLockup(
     uint256 _stakeAmount,
     uint256 _unstakeAmount,
@@ -515,6 +570,42 @@ contract Unstake is QueryTypeStakingPoolTest {
     vm.prank(staker);
     pool.unstake(_unstakeAmount);
   }
+
+  function testFuzz_UnstakeBlockedUser(
+    uint256 _stakeAmount,
+    uint256 _unstakeAmount,
+    uint256 _timeSkip,
+    uint256 _capacity
+  ) public {
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _unstakeAmount = bound(_unstakeAmount, 1, _stakeAmount);
+    _timeSkip = bound(_timeSkip, pool.lockupPeriod() + 1, MAX_TIME_SKIP);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Initial stake
+    vm.prank(staker);
+    pool.stake(_stakeAmount);
+
+    // Block the staker
+    pool.blocklist(staker);
+
+    // Warp to valid unstake time
+    vm.warp(block.timestamp + _timeSkip);
+
+    uint256 initialTotalJailed = pool.totalJailed();
+
+    vm.prank(staker);
+    pool.unstake(_unstakeAmount);
+
+    assertEq(
+      pool.totalJailed(),
+      initialTotalJailed - _unstakeAmount,
+      "Total jailed should decrease by unstake amount"
+    );
+    assertEq(pool.totalStaked(), 0, "Total staked should be zero after jailing");
+  }
 }
 
 contract SetSigner is QueryTypeStakingPoolTest {
@@ -565,5 +656,119 @@ contract SetSigner is QueryTypeStakingPoolTest {
     vm.prank(staker);
     vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__NoStakeFound.selector);
     pool.setSigner(_signer);
+  }
+}
+
+contract Blocklist is QueryTypeStakingPoolTest {
+  function testFuzz_BlocklistUserSuccessfully(
+    address _user,
+    uint256 _stakeAmount,
+    uint256 _capacity
+  ) public {
+    vm.assume(_user != address(0));
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Setup stake for user
+    stakingToken.mint(_user, _stakeAmount);
+    vm.startPrank(_user);
+    stakingToken.approve(address(pool), _stakeAmount);
+    pool.stake(_stakeAmount);
+    vm.stopPrank();
+
+    // Blocklist user
+    pool.blocklist(_user);
+
+    assertTrue(pool.isBlocklisted(_user));
+    assertEq(pool.totalJailed(), _stakeAmount);
+    assertEq(pool.totalStaked(), 0);
+  }
+
+  function testFuzz_BlocklistEmitsEvents(address _user, uint256 _stakeAmount, uint256 _capacity)
+    public
+  {
+    vm.assume(_user != address(0));
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Setup stake for user
+    stakingToken.mint(_user, _stakeAmount);
+    vm.startPrank(_user);
+    stakingToken.approve(address(pool), _stakeAmount);
+    pool.stake(_stakeAmount);
+    vm.stopPrank();
+
+    vm.expectEmit();
+    emit QueryTypeStakingPool.StakeJailed(_user, _stakeAmount);
+    vm.expectEmit();
+    emit QueryTypeStakingPool.AddressBlocklisted(_user);
+
+    pool.blocklist(_user);
+  }
+
+  function testFuzz_RevertIf_BlocklistingAlreadyBlocklistedUser(
+    address _user,
+    uint256 _stakeAmount,
+    uint256 _capacity
+  ) public {
+    vm.assume(_user != address(0));
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Setup stake for user
+    stakingToken.mint(_user, _stakeAmount);
+    vm.startPrank(_user);
+    stakingToken.approve(address(pool), _stakeAmount);
+    pool.stake(_stakeAmount);
+    vm.stopPrank();
+
+    // First blocklist
+    pool.blocklist(_user);
+
+    // Try to blocklist again
+    vm.expectRevert(QueryTypeStakingPool.QueryTypeStakingPool__AlreadyBlocklisted.selector);
+    pool.blocklist(_user);
+  }
+
+  function testFuzz_BlocklistingUserWithNoStake(address _user) public {
+    vm.assume(_user != address(0));
+
+    // Blocklist user with no stake
+    pool.blocklist(_user);
+
+    assertTrue(pool.isBlocklisted(_user));
+    assertEq(pool.totalJailed(), 0); // No tokens to jail
+    assertEq(pool.totalStaked(), 0); // No tokens staked
+  }
+
+  function testFuzz_RevertIf_NotOwnerTriesToBlocklist(
+    address _notOwner,
+    address _user,
+    uint256 _stakeAmount,
+    uint256 _capacity
+  ) public {
+    vm.assume(_notOwner != address(this)); // not owner
+    vm.assume(_user != address(0));
+    _stakeAmount = bound(_stakeAmount, 1, INITIAL_BALANCE);
+    _capacity = bound(_capacity, _stakeAmount, type(uint256).max);
+
+    pool.setStakingTokenCapacity(_capacity);
+
+    // Setup stake for user
+    stakingToken.mint(_user, _stakeAmount);
+    vm.startPrank(_user);
+    stakingToken.approve(address(pool), _stakeAmount);
+    pool.stake(_stakeAmount);
+    vm.stopPrank();
+
+    vm.prank(_notOwner);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, _notOwner));
+    pool.blocklist(_user);
   }
 }

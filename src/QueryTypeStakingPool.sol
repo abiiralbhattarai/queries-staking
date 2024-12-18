@@ -54,6 +54,12 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice The total amount of tokens currently staked in the pool.
   uint256 public totalStaked;
 
+  /// @notice The total amount of tokens currently jailed in the pool.
+  uint256 public totalJailed;
+
+  /// @notice Maps addresses to their blocklist status for this pool.
+  mapping(address user => bool blocked) public isBlocklisted;
+
   /// @notice Emitted when a new conversion table entry is added to track changes in the conversion
   /// rate.
   event ConversionTableUpdated(bytes32 newEntry);
@@ -85,6 +91,12 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice Emitted when a staker's signer is updated.
   event SignerUpdated(address indexed staker, address indexed oldSigner, address indexed newSigner);
 
+  /// @notice Emitted when a stake is jailed.
+  event StakeJailed(address indexed staker, uint256 amount);
+
+  /// @notice Emitted when an address is blocklisted for this pool
+  event AddressBlocklisted(address indexed user);
+
   /// @notice Thrown when attempting to stake with an invalid lockup period.
   error QueryTypeStakingPool__LockupPeriodTooLow();
 
@@ -108,6 +120,18 @@ contract QueryTypeStakingPool is Ownable {
 
   /// @notice Thrown when attempting to unstake more than staked amount.
   error QueryTypeStakingPool__InsufficientBalance();
+
+  /// @notice Thrown when only the factory or owner can call setStakingTokenCapacity.
+  error QueryTypeStakingPool__OnlyFactoryOrOwner();
+
+  /// @notice Thrown when only the factory can call a function.
+  error QueryTypeStakingPool__OnlyFactory();
+
+  /// @notice Thrown when trying to blocklist an already blocklisted address
+  error QueryTypeStakingPool__AlreadyBlocklisted();
+
+  /// @notice Thrown when trying to stake from a blocklisted address
+  error QueryTypeStakingPool__AddressBlocklisted();
 
   /// @notice Initializes the contract with the staking token address and initial conversion table
   /// entry.
@@ -169,8 +193,9 @@ contract QueryTypeStakingPool is Ownable {
   /// @param _amount The amount of tokens to stake.
   function stake(uint256 _amount) external {
     if (_amount < minimumStake) revert QueryTypeStakingPool__AmountBelowMinimum();
+    if (isBlocklisted[msg.sender]) revert QueryTypeStakingPool__AddressBlocklisted();
 
-    if (totalStaked + _amount > stakingTokenCapacity) {
+    if (totalStaked - totalJailed + _amount > stakingTokenCapacity) {
       revert QueryTypeStakingPool__CapacityExceeded();
     }
 
@@ -220,8 +245,10 @@ contract QueryTypeStakingPool is Ownable {
     if (block.timestamp < userStake.lockupEnd) revert QueryTypeStakingPool__StillInLockupPeriod();
     if (_amount > userStake.amount) revert QueryTypeStakingPool__InsufficientBalance();
 
+    if (isBlocklisted[msg.sender]) totalJailed -= _amount;
+    else totalStaked -= _amount;
+
     userStake.amount -= _amount;
-    totalStaked -= _amount;
     STAKING_TOKEN.safeTransfer(msg.sender, _amount);
 
     emit Unstaked(msg.sender, _amount);
@@ -234,5 +261,26 @@ contract QueryTypeStakingPool is Ownable {
     address oldSigner = stakerSigners[msg.sender];
     stakerSigners[msg.sender] = _newSigner;
     emit SignerUpdated(msg.sender, oldSigner, _newSigner);
+  }
+
+  /// @notice Blocklists an address for this pool.
+  /// @param _user The address to blocklist.
+  /// @dev Only callable by the pool owner.
+  function blocklist(address _user) external {
+    _checkOwner();
+
+    if (isBlocklisted[_user]) revert QueryTypeStakingPool__AlreadyBlocklisted();
+
+    StakeInfo storage userStake = stakes[_user];
+    uint256 amountToJail = userStake.amount;
+
+    if (amountToJail > 0) {
+      totalJailed += amountToJail;
+      totalStaked -= amountToJail;
+      emit StakeJailed(_user, amountToJail);
+    }
+
+    isBlocklisted[_user] = true;
+    emit AddressBlocklisted(_user);
   }
 }
