@@ -156,6 +156,7 @@ contract Stake is QueryTypeStakingPoolTest {
       _initialAmount > _decayed ? _initialAmount - _decayed + _additionalAmount : _additionalAmount;
 
     assertEq(finalStake.amount, _expectedFinal, "Total stake amount incorrect");
+    assertEq(finalStake.capacity, _expectedFinal, "Capacity is incorrect");
     assertEq(
       finalStake.conversionTableIndex,
       _originalStake.conversionTableIndex,

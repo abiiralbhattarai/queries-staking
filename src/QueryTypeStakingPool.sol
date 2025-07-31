@@ -240,7 +240,7 @@ contract QueryTypeStakingPool is Ownable {
     }
 
     _stakeInfo.amount += _amount;
-    _stakeInfo.capacity += _stakeInfo.amount;
+    _stakeInfo.capacity = _stakeInfo.amount;
     _stakeInfo.lastClaimed = uint48(block.timestamp);
     stakes[msg.sender] = _stakeInfo;
 
