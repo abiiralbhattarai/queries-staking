@@ -29,10 +29,10 @@ contract QueryTypeStakingPool is Ownable {
 
   /// @notice The duration in seconds that tokens will be locked after staking. During this period
   /// tokens cannot be withdrawn.
-  uint48 public lockupPeriod = 30 days;
+  uint48 public lockupPeriod;
 
   /// @notice The duration in seconds after the lockup period during which tokens can be withdrawn.
-  uint48 public accessPeriod = 60 days;
+  uint48 public accessPeriod;
 
   /// @notice The array that stores the history of conversion table entries. Each entry represents a
   /// conversion rate between staked tokens and query credits at a point in time.
@@ -57,7 +57,7 @@ contract QueryTypeStakingPool is Ownable {
   }
 
   /// @notice A mapping that associates staker addresses with their stake information.
-  mapping(address staker => StakeInfo info) public stakes;
+  mapping(address staker => StakeInfo info) private stakes;
 
   /// @notice A mapping that associates each staker with their signer.
   mapping(address staker => address signer) public stakerSigners;
@@ -167,12 +167,18 @@ contract QueryTypeStakingPool is Ownable {
   /// @param _factory The address of the factory that deployed this pool.
   /// @param _initialConversionTableEntry The first entry in the conversion table history.
   /// @param _decayRate The decay rate for the stake.
+  /// @param _lockupPeriod The duration in seconds that tokens will be locked after staking.
+  /// @param _accessPeriod The duration in seconds after lockup during which tokens can be
+  /// withdrawn. @param _minimumStake The minimum amount of tokens required to stake.
   constructor(
     address _owner,
     address _stakingToken,
     address _factory,
     bytes32 _initialConversionTableEntry,
-    uint8 _decayRate
+    uint8 _decayRate,
+    uint48 _lockupPeriod,
+    uint48 _accessPeriod,
+    uint256 _minimumStake
   ) Ownable(_owner) {
     STAKING_TOKEN = IERC20(_stakingToken);
     FACTORY = _factory;
@@ -180,49 +186,47 @@ contract QueryTypeStakingPool is Ownable {
     if (_decayRate > 100) revert QueryTypeStakingPool__InvalidDecayRate();
     DECAY_RATE = _decayRate;
 
+    _setLockupPeriod(_lockupPeriod);
+    _setAccessPeriod(_accessPeriod);
+    _setMinimumStake(_minimumStake);
+
     // Initialize the conversion table with the provided entry
-    conversionTableHistory.push(_initialConversionTableEntry);
-    emit ConversionTableUpdated(_initialConversionTableEntry);
+    _updateConversionTable(_initialConversionTableEntry);
   }
 
   /// @notice Sets the global staking capacity.
   /// @param _capacity The new staking capacity.
   function setStakingTokenCapacity(uint256 _capacity) external {
     _checkOwner();
-    stakingTokenCapacity = _capacity;
-    emit StakingTokenCapacityUpdated(_capacity);
+    _setStakingTokenCapacity(_capacity);
   }
 
   /// @notice Sets the minimum stake amount.
   /// @param _minimumStake The new minimum stake amount.
   function setMinimumStake(uint256 _minimumStake) external {
     _checkOwner();
-    minimumStake = _minimumStake;
-    emit MinimumStakeUpdated(_minimumStake);
+    _setMinimumStake(_minimumStake);
   }
 
   /// @notice Sets the lockup period duration
   /// @param _period The new lockup period in seconds
   function setLockupPeriod(uint48 _period) external {
     _checkOwner();
-    lockupPeriod = _period;
-    emit LockupPeriodUpdated(_period);
+    _setLockupPeriod(_period);
   }
 
   /// @notice Sets the access period duration
   /// @param _period The new access period in seconds
   function setAccessPeriod(uint48 _period) external {
     _checkOwner();
-    accessPeriod = _period;
-    emit AccessPeriodUpdated(_period);
+    _setAccessPeriod(_period);
   }
 
   /// @notice Adds a new conversion table entry to track changes in the conversion rate.
   /// @param _newEntry The new conversion table entry to add to the history.
   function updateConversionTable(bytes32 _newEntry) external {
     _checkOwner();
-    conversionTableHistory.push(_newEntry);
-    emit ConversionTableUpdated(_newEntry);
+    _updateConversionTable(_newEntry);
   }
 
   /// @notice Allows users to stake tokens for the predefined lockup and access periods.
@@ -316,12 +320,12 @@ contract QueryTypeStakingPool is Ownable {
 
     if (isBlocklisted[_user]) revert QueryTypeStakingPool__AlreadyBlocklisted();
 
-    uint256 amountToJail = stakes[_user].amount;
+    uint256 _amountToJail = stakes[_user].amount;
 
-    if (amountToJail > 0) {
-      totalCapacityJailed += amountToJail;
-      totalCapacityStaked -= amountToJail;
-      emit StakeJailed(_user, amountToJail);
+    if (_amountToJail > 0) {
+      totalCapacityJailed += _amountToJail;
+      totalCapacityStaked -= _amountToJail;
+      emit StakeJailed(_user, _amountToJail);
     }
 
     isBlocklisted[_user] = true;
@@ -337,6 +341,31 @@ contract QueryTypeStakingPool is Ownable {
     _claimDecay(_staker);
   }
 
+  /// @notice Returns the stake information for a given staker with decay applied.
+  /// @param _staker The address of the staker.
+  /// @return The stake information with decay applied to the amount.
+  function getStakeInfo(address _staker) external view returns (StakeInfo memory) {
+    StakeInfo memory _stakeInfo = stakes[_staker];
+    if (_stakeInfo.amount == 0) return _stakeInfo;
+
+    uint256 _elapsed = block.timestamp - _stakeInfo.lastClaimed;
+    if (_elapsed == 0) return _stakeInfo;
+
+    uint256 _totalPeriod = _stakeInfo.accessEnd - _stakeInfo.lastClaimed;
+    if (_totalPeriod == 0) return _stakeInfo;
+
+    uint256 _maxDecay = (_stakeInfo.amount * _elapsed) / _totalPeriod;
+
+    // Apply proportional fee loss based on DECAY_RATE.
+    uint256 _decayed = (_maxDecay * DECAY_RATE) / 100;
+
+    if (_decayed > _stakeInfo.amount) _decayed = _stakeInfo.amount;
+
+    // Apply decay to the returned stake info
+    _stakeInfo.amount -= _decayed;
+    return _stakeInfo;
+  }
+
   /// @notice Internal helper that settles the decayed portion of a stake.
   /// @param _staker The address whose decayed stake should be claimed.
   /// @return _claimed The amount of decayed stake claimed.
@@ -344,31 +373,66 @@ contract QueryTypeStakingPool is Ownable {
     StakeInfo storage stakeInfo = stakes[_staker];
     if (stakeInfo.amount == 0) return 0;
 
-    uint256 elapsed = block.timestamp - stakeInfo.lastClaimed;
-    if (elapsed == 0) return 0;
+    uint256 _elapsed = block.timestamp - stakeInfo.lastClaimed;
+    if (_elapsed == 0) return 0;
 
-    uint256 totalPeriod = stakeInfo.accessEnd - stakeInfo.lastClaimed;
-    if (totalPeriod == 0) return 0;
+    uint256 _totalPeriod = stakeInfo.accessEnd - stakeInfo.lastClaimed;
+    if (_totalPeriod == 0) return 0;
 
-    uint256 decayed = (stakeInfo.amount * elapsed) / totalPeriod;
+    uint256 _maxDecay = (stakeInfo.amount * _elapsed) / _totalPeriod;
 
     // Apply proportional fee loss based on DECAY_RATE.
     // DECAY_RATE represents the % of the decayed amount that should be lost as fees.
     // Example: DECAY_RATE = 80 → lose 80% of the decayed amount as fees.
-    decayed = (decayed * DECAY_RATE) / 100;
+    uint256 _decayed = (_maxDecay * DECAY_RATE) / 100;
 
-    if (decayed == 0) return 0;
+    if (_decayed == 0) return 0;
 
-    if (decayed > stakeInfo.amount) decayed = stakeInfo.amount;
+    if (_decayed > stakeInfo.amount) _decayed = stakeInfo.amount;
 
     // Apply decay and update accounting
-    stakeInfo.amount -= decayed;
+    stakeInfo.amount -= _decayed;
     stakeInfo.lastClaimed = uint48(block.timestamp);
 
-    address feeRecipient = QueryTypeStakerFactory(FACTORY).feeRecipient();
-    STAKING_TOKEN.safeTransfer(feeRecipient, decayed);
+    address _feeRecipient = QueryTypeStakerFactory(FACTORY).feeRecipient();
+    STAKING_TOKEN.safeTransfer(_feeRecipient, _decayed);
 
-    emit DecayClaimed(_staker, decayed, feeRecipient);
-    return decayed;
+    emit DecayClaimed(_staker, _decayed, _feeRecipient);
+    return _decayed;
+  }
+
+  /// @notice Internal function to set the staking capacity.
+  /// @param _capacity The new staking capacity.
+  function _setStakingTokenCapacity(uint256 _capacity) internal {
+    stakingTokenCapacity = _capacity;
+    emit StakingTokenCapacityUpdated(_capacity);
+  }
+
+  /// @notice Internal function to set the minimum stake amount.
+  /// @param _minimumStake The new minimum stake amount.
+  function _setMinimumStake(uint256 _minimumStake) internal {
+    minimumStake = _minimumStake;
+    emit MinimumStakeUpdated(_minimumStake);
+  }
+
+  /// @notice Internal function to set the lockup period.
+  /// @param _period The new lockup period in seconds.
+  function _setLockupPeriod(uint48 _period) internal {
+    lockupPeriod = _period;
+    emit LockupPeriodUpdated(_period);
+  }
+
+  /// @notice Internal function to set the access period.
+  /// @param _period The new access period in seconds.
+  function _setAccessPeriod(uint48 _period) internal {
+    accessPeriod = _period;
+    emit AccessPeriodUpdated(_period);
+  }
+
+  /// @notice Internal function to update the conversion table.
+  /// @param _newEntry The new conversion table entry to add.
+  function _updateConversionTable(bytes32 _newEntry) internal {
+    conversionTableHistory.push(_newEntry);
+    emit ConversionTableUpdated(_newEntry);
   }
 }
