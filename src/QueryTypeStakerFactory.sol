@@ -79,7 +79,7 @@ contract QueryTypeStakerFactory is Ownable {
     if (_decayRate > 100) revert QueryTypeStakerFactory__InvalidDecayRate();
 
     // Validate that both periods are not zero
-    if (_lockupPeriod == 0 && _accessPeriod == 0) {
+    if (_lockupPeriod == 0 || _accessPeriod == 0) {
       revert QueryTypeStakerFactory__InvalidPeriodConfig();
     }
 
