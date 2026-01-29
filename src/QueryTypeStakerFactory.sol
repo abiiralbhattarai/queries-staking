@@ -38,7 +38,7 @@ contract QueryTypeStakerFactory is Ownable {
   /// @notice Thrown when the decay rate encoded in query type exceeds 100.
   error QueryTypeStakerFactory__InvalidDecayRate();
 
-  /// @notice Thrown when both lockup and access periods are zero.
+  /// @notice  Thrown when either lockup or access period is zero.
   error QueryTypeStakerFactory__InvalidPeriodConfig();
 
   /// @notice Constructor that sets the initial owner and staking token.

@@ -159,7 +159,7 @@ contract QueryTypeStakingPool is Ownable {
   /// @notice Thrown when trying to stake from a blocklisted address
   error QueryTypeStakingPool__AddressBlocklisted();
 
-  /// @notice Thrown when both lockup and access periods are zero.
+  /// @notice Thrown when a lockup or access period is zero.
   error QueryTypeStakingPool__InvalidPeriodConfig();
 
   /// @notice Initializes the contract with the staking token address and initial conversion table
